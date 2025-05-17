@@ -87,7 +87,8 @@ def get_user_stats(guild_id: str, user_id: str) -> Dict[str, int]:
     if user_id not in stats[guild_id]['users']:
         stats[guild_id]['users'][user_id] = {
             'counts': 0,
-            'wins': 0
+            'wins': 0,
+            'fails': 0
         }
     return stats[guild_id]['users'][user_id]
 
@@ -128,7 +129,19 @@ async def on_ready():
     global stats, active_games
     stats = load_stats()
     active_games = load_games()
-    print("Loaded stats and active games from disk")
+    print(f"Loaded stats and active games from disk. Active games: {active_games}")
+    
+    # Process any messages that were sent while the bot was offline
+    for guild in bot.guilds:
+        for channel in guild.text_channels:
+            if channel.id in active_games:
+                print(f"Found active counting game in channel {channel.name} ({channel.id})")
+                try:
+                    async for message in channel.history(limit=1):
+                        if message.author != bot.user:
+                            await bot.process_commands(message)
+                except Exception as e:
+                    print(f"Error processing messages in channel {channel.name}: {e}")
 
 @bot.tree.command(name="ping", description="Check the bot's latency")
 async def ping(interaction: discord.Interaction):
@@ -142,7 +155,7 @@ async def help(interaction: discord.Interaction):
     await interaction.response.send_message(
         f'''
         Here are the available commands:
-         \- /start starts counting in this channel (mod only)
+         \- /start marks a channel as counting mod only)
          \- /count checks the current count in the game
          \- /leaderboard shows the server's counting leaderboard (it has two paramaters, team and page)
          \- /teamstats shows the team statistics
@@ -278,6 +291,7 @@ async def check_count(interaction: discord.Interaction):
     embed.add_field(name="Progress", value=progress)
     await interaction.response.send_message(embed=embed)
 
+# i think this command no longer needs to exist
 @bot.tree.command(name="printrawstats", description="Print the raw stats")
 async def print_raw_stats(interaction: discord.Interaction):
     """Print the raw stats"""
@@ -291,7 +305,7 @@ async def print_raw_stats(interaction: discord.Interaction):
 async def leaderboard(interaction: discord.Interaction, team: Optional[app_commands.Choice[str]] = None, page: int = 1):
     """View the server's counting leaderboard"""
     global stats
-    print(stats)
+    #print(stats)
     guild_id = str(interaction.guild_id)
     
     if guild_id not in stats or 'users' not in stats[guild_id]:
@@ -310,7 +324,7 @@ async def leaderboard(interaction: discord.Interaction, team: Optional[app_comma
         team_value = 1 if team.value == 'up' else -1
         sorted_users = [user for user in sorted_users if getTeam(int(user[0]), interaction.guild) == team_value]
     
-    total_pages = (len(sorted_users) + 9) // 10  # Add 9 to handle partial last page, source copilot so i guess it works
+    total_pages = (len(sorted_users) + 9) // 10
     if page < 1 or page > total_pages:
         await interaction.response.send_message("Invalid page number!", ephemeral=True)
         return
@@ -330,22 +344,27 @@ async def leaderboard(interaction: discord.Interaction, team: Optional[app_comma
             team_emoji = "⬆️" if team_value == 1 else "⬇️" if team_value == -1 else "❓"
             embed.add_field(
                 name=f"{i}. {user.display_name} {team_emoji}",
-                value=f"Counts: {user_data['counts']} | Wins: {user_data['wins']}",
+                value=f"Counts: {user_data['counts']} | Wins: {user_data['wins']} | Fails: {user_data.get('fails', 0)}",
                 inline=False
             )
     
     await interaction.response.send_message(embed=embed)
 
+# handle messages from users
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
-    
-    channel_id = message.channel.id
+
+    channel_id = str(message.channel.id)
     if channel_id not in active_games:
         return
     
-    game = active_games[channel_id]
+    # Ensure we have the latest game state
+    game = active_games.get(channel_id)
+    if not game:
+        print(f"Warning: Channel {channel_id} marked as active but no game data found")
+        return
     
     # Check if the message is a number
     m = message.content.strip()
@@ -353,12 +372,10 @@ async def on_message(message: discord.Message):
         await message.add_reaction("✅")
         return
     m = m.split(" ")
-    # i love this totally amazing code with 0 vulnerabilities
-    # way better than os.exec() LMAO
-    try: # try evaluating the whole message, maybe its like addition or something
+    try:
         number = int(ne.evaluate(''.join(m)))
     except Exception as e:
-        try: # try evaluating just the first block, maybe they added a message with a number
+        try:
             number = int(ne.evaluate(m[0]))
         except: 
             pass
@@ -372,8 +389,7 @@ async def on_message(message: discord.Message):
     if not (up_role in message.author.roles or down_role in message.author.roles):
         assigned_role = await assign_team(message.author, up_role, down_role)
         await message.channel.send(f"Welcome {message.author.mention}! You've been assigned to team {assigned_role.name}! Your next count will be registered.")
-        return  # Don't process the number, let them count on their next turn
-        # you dont want like a 50/50 on whether you're cunting up or down
+        return
     
     # Determine if user is counting up or down
     is_counting_up = up_role in message.author.roles
@@ -385,6 +401,13 @@ async def on_message(message: discord.Message):
             await message.add_reaction('⚠️')
             await message.channel.send(f"{message.author.mention} someone just ruined the count! make sure to count the right number next time!. counting starts from  {game['current_number']}")
             return
+        
+        # Update user's fail count
+        guild_id = str(message.guild.id)
+        user_stats = get_user_stats(guild_id, str(message.author.id))
+        user_stats['fails'] += 1
+        save_stats(stats)
+        
         await message.add_reaction('❌')
         if is_counting_up:
             game["current_number"] -= 5
@@ -392,7 +415,7 @@ async def on_message(message: discord.Message):
             game["current_number"] += 5
         await message.channel.send(f"❌ {message.author.mention} broke the sequence! The opposing team gets 5 counts. The count is now {game['current_number']}.")
         game["last_counter"] = None
-        save_games(active_games)  # Save after updating the count
+        save_games(active_games)
         return
     
     # Check if the same person is counting twice in a row
@@ -401,6 +424,13 @@ async def on_message(message: discord.Message):
             await message.add_reaction('⚠️')
             await message.channel.send(f"{message.author.mention} someone just ruined the count! make sure to count the right number next time!. counting starts from  {game['current_number']}")
             return
+        
+        # Update user's fail count
+        guild_id = str(message.guild.id)
+        user_stats = get_user_stats(guild_id, str(message.author.id))
+        user_stats['fails'] += 1
+        save_stats(stats)
+        
         await message.add_reaction('❌')
         if is_counting_up:
             game["current_number"] -= 5
@@ -408,7 +438,7 @@ async def on_message(message: discord.Message):
             game["current_number"] += 5
         await message.channel.send(f"❌ {message.author.mention} can't count twice in a row! The opposing team gets 5 counts. The count is now {game['current_number']}.")
         game["last_counter"] = None
-        save_games(active_games)  
+        save_games(active_games)
         return
     
     # Valid count

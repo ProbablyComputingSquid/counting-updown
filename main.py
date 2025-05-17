@@ -141,16 +141,17 @@ async def help(interaction: discord.Interaction):
     """Get some help on commands"""
     await interaction.response.send_message(
         f'''
-        Here are the available commands:\n
-         - /start starts counting in this channel (mod only)\n
-         - /count checks the current count in the game\n
-         - /leaderboard shows the server's counting leaderboard\n
-         - /teamstats shows the team statistics\n
-         - /switchteam switches a player's team (mod only)\n
-         - /ping checks latency \n
-         - /help shows this message
-         - /stop stops the counting in this channel (mod only)
-         '''
+        Here are the available commands:
+         \- /start starts counting in this channel (mod only)
+         \- /count checks the current count in the game
+         \- /leaderboard shows the server's counting leaderboard (it has two paramaters, team and page)
+         \- /teamstats shows the team statistics
+         \- /switchteam switches a player's team (mod only)
+         \- /ping checks latency 
+         \- /help shows this message
+         \- /stop stops the counting in this channel (mod only)
+         ''',
+         ephemeral=True
     )
 
 @bot.tree.command(name="start", description="Start a counting in this channel (mod only)")

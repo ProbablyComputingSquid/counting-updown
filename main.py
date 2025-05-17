@@ -474,7 +474,7 @@ async def on_message(message: discord.Message):
         # Save both stats and games
         save_stats(stats)
         save_games(active_games)
-        
+        await message.add_reaction('🎉')
         await message.channel.send(f"🎉 Team {winning_team} has won! The count has been reset to 0.")
         game["current_number"] = 0
         game["last_counter"] = None

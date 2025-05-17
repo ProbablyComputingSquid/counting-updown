@@ -7,6 +7,7 @@ import json
 from typing import Dict, Optional, Tuple
 from pathlib import Path
 import random
+import numexpr as ne
 
 load_dotenv()
 
@@ -24,38 +25,58 @@ STATS_FILE = 'db/counting_stats.json'
 UP_TEAM_ROLE = "Counting Up"
 DOWN_TEAM_ROLE = "Counting Down"
 
+def ensure_db_dir():
+    """Ensure the db directory exists"""
+    Path('db').mkdir(exist_ok=True)
+
 def load_stats() -> Dict[str, Dict[str, Dict[str, int]]]:
     """Load statistics from JSON file"""
+    ensure_db_dir()
     if not Path(STATS_FILE).exists():
         return {}
     try:
         with open(STATS_FILE, 'r') as f:
             return json.load(f)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, FileNotFoundError):
         return {}
 
 def save_stats(stats: Dict[str, Dict[str, Dict[str, int]]]):
     """Save statistics to JSON file"""
-    with open(STATS_FILE, 'w') as f:
-        json.dump(stats, f, indent=2)
+    ensure_db_dir()
+    try:
+        with open(STATS_FILE, 'w') as f:
+            json.dump(stats, f, indent=2)
+    except Exception as e:
+        print(f"Error saving stats: {e}")
 
 def load_games() -> Dict[int, dict]:
     """Load active games from JSON file"""
+    ensure_db_dir()
     if not Path(STATS_FILE).exists():
         return {}
     try:
         with open(STATS_FILE, 'r') as f:
             data = json.load(f)
             return data.get('active_games', {})
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, FileNotFoundError):
         return {}
 
 def save_games(games: Dict[int, dict]):
     """Save active games to JSON file"""
-    data = load_stats()
-    data['active_games'] = games
-    with open(STATS_FILE, 'w') as f:
-        json.dump(data, f, indent=2)
+    ensure_db_dir()
+    try:
+        data = load_stats()
+        data['active_games'] = games
+        with open(STATS_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"Error saving games: {e}")
+
+# Load existing stats and games
+global stats
+global active_games
+stats = load_stats()
+active_games = load_games()
 
 def get_user_stats(guild_id: str, user_id: str) -> Dict[str, int]:
     """Get or initialize user stats"""
@@ -69,10 +90,6 @@ def get_user_stats(guild_id: str, user_id: str) -> Dict[str, int]:
             'wins': 0
         }
     return stats[guild_id]['users'][user_id]
-
-# Load existing stats and games
-stats = load_stats()
-active_games = load_games()
 
 async def get_or_create_roles(guild: discord.Guild) -> Tuple[discord.Role, discord.Role]:
     """Get or create the team roles"""
@@ -106,6 +123,12 @@ async def on_ready():
         print(f"Synced {len(synced)} command(s)")
     except Exception as e:
         print(f"Failed to sync commands: {e}")
+    
+    # Reload stats and games on startup
+    global stats, active_games
+    stats = load_stats()
+    active_games = load_games()
+    print("Loaded stats and active games from disk")
 
 @bot.tree.command(name="ping", description="Check the bot's latency")
 async def ping(interaction: discord.Interaction):
@@ -124,10 +147,13 @@ async def help(interaction: discord.Interaction):
          - /leaderboard shows the server's counting leaderboard\n
          - /teamstats shows the team statistics\n
          - /switchteam switches a player's team (mod only)\n
+         - /ping checks latency \n
+         - /help shows this message
+         - /stop stops the counting in this channel (mod only)
          '''
     )
 
-@bot.tree.command(name="start", description="Start a counting in this channel")
+@bot.tree.command(name="start", description="Start a counting in this channel (mod only)")
 @app_commands.checks.has_permissions(manage_channels=True)
 async def start_game(interaction: discord.Interaction):
     """Start a team counting game in the current channel"""
@@ -162,12 +188,14 @@ async def start_game(interaction: discord.Interaction):
         f"Players will be automatically assigned to teams when they first count"
     )
 
-@bot.tree.command(name="stop", description="Stop the counting game in this channel")
+@bot.tree.command(name="stop", description="Stop the counting game in this channel (mod only)")
 @app_commands.checks.has_permissions(manage_channels=True)
 async def stop_game(interaction: discord.Interaction):
     """Stop the counting game in the current channel"""
     channel_id = interaction.channel_id
-    
+    if not interaction.user.guild_permissions.manage_channels:
+        await interaction.response.send_message("You don't have permission to stop the counting in this channel!", ephemeral=True)
+        return
     if channel_id not in active_games:
         await interaction.response.send_message("No counting game is active in this channel!", ephemeral=True)
         return
@@ -223,7 +251,10 @@ async def switch_team(interaction: discord.Interaction, user: discord.Member):
 @bot.tree.command(name="count", description="Check the current count in the channel")
 async def check_count(interaction: discord.Interaction):
     """Check the current count in the game"""
-    channel_id = interaction.channel_id
+    global active_games
+    active_games = load_games()  # Reload games to ensure we have latest state
+    
+    channel_id = str(interaction.channel_id)
     
     if channel_id not in active_games:
         await interaction.response.send_message("No counting game is active in this channel!", ephemeral=True)
@@ -246,13 +277,24 @@ async def check_count(interaction: discord.Interaction):
     embed.add_field(name="Progress", value=progress)
     await interaction.response.send_message(embed=embed)
 
+@bot.tree.command(name="printrawstats", description="Print the raw stats")
+async def print_raw_stats(interaction: discord.Interaction):
+    """Print the raw stats"""
+    await interaction.response.send_message(str(stats))
+
 @bot.tree.command(name="leaderboard", description="View the server's counting leaderboard")
-async def leaderboard(interaction: discord.Interaction):
+@app_commands.choices(team=[
+    app_commands.Choice(name="Up", value="up"),
+    app_commands.Choice(name="Down", value="down")
+])
+async def leaderboard(interaction: discord.Interaction, team: Optional[app_commands.Choice[str]] = None, page: int = 1):
     """View the server's counting leaderboard"""
+    global stats
+    print(stats)
     guild_id = str(interaction.guild_id)
     
     if guild_id not in stats or 'users' not in stats[guild_id]:
-        await interaction.response.send_message("No counting statistics available yet!", ephemeral=True)
+        await interaction.response.send_message("No counting statistics available yet - go count, you fools!", ephemeral=True)
         return
     
     # Get user stats and sort by counts
@@ -263,20 +305,31 @@ async def leaderboard(interaction: discord.Interaction):
         reverse=True
     )
     
+    if team:
+        team_value = 1 if team.value == 'up' else -1
+        sorted_users = [user for user in sorted_users if getTeam(int(user[0]), interaction.guild) == team_value]
+    
+    total_pages = (len(sorted_users) + 9) // 10  # Add 9 to handle partial last page, source copilot so i guess it works
+    if page < 1 or page > total_pages:
+        await interaction.response.send_message("Invalid page number!", ephemeral=True)
+        return
+
     # Create embed
     embed = discord.Embed(
-        title="Counting Leaderboard",
-        description="Top counters in this server",
+        title=f'Top counters in {interaction.guild.name}',
+        description=f'Page {page} of {total_pages}',
         color=discord.Color.gold()
     )
     
     # Add top 10 users to embed
-    for i, (user_id, stats) in enumerate(sorted_users[:10], 1):
+    for i, (user_id, user_data) in enumerate(sorted_users[(page-1) * 10: page * 10], 1):
         user = interaction.guild.get_member(int(user_id))
         if user:
+            team_value = getTeam(int(user_id), interaction.guild)
+            team_emoji = "⬆️" if team_value == 1 else "⬇️" if team_value == -1 else "❓"
             embed.add_field(
-                name=f"{i}. {user.display_name}",
-                value=f"Counts: {stats['counts']} | Wins: {stats['wins']}",
+                name=f"{i}. {user.display_name} {team_emoji}",
+                value=f"Counts: {user_data['counts']} | Wins: {user_data['wins']}",
                 inline=False
             )
     
@@ -294,9 +347,20 @@ async def on_message(message: discord.Message):
     game = active_games[channel_id]
     
     # Check if the message is a number
-    try:
-        number = int(message.content.strip())
-    except ValueError:
+    m = message.content.strip()
+    if m.lower() == "your mother":
+        await message.add_reaction("✅")
+        return
+    m = m.split(" ")
+    # i love this totally amazing code with 0 vulnerabilities
+    # way better than os.exec() LMAO
+    try: # try evaluating the whole message, maybe its like addition or something
+        number = int(ne.evaluate(''.join(m)))
+    except Exception as e:
+        try: # try evaluating just the first block, maybe they added a message with a number
+            number = int(ne.evaluate(m[0]))
+        except: 
+            pass
         return
     
     # Get user's team
@@ -308,6 +372,7 @@ async def on_message(message: discord.Message):
         assigned_role = await assign_team(message.author, up_role, down_role)
         await message.channel.send(f"Welcome {message.author.mention}! You've been assigned to team {assigned_role.name}! Your next count will be registered.")
         return  # Don't process the number, let them count on their next turn
+        # you dont want like a 50/50 on whether you're cunting up or down
     
     # Determine if user is counting up or down
     is_counting_up = up_role in message.author.roles
@@ -315,6 +380,10 @@ async def on_message(message: discord.Message):
     # Check if it's the next number in sequence
     expected_number = game["current_number"] + 1 if is_counting_up else game["current_number"] - 1
     if number != expected_number:
+        if game["last_counter"] == None: # warn the user because count reset
+            await message.add_reaction('⚠️')
+            await message.channel.send(f"{message.author.mention} someone just ruined the count! make sure to count the right number next time!. counting starts from  {game['current_number']}")
+            return
         await message.add_reaction('❌')
         if is_counting_up:
             game["current_number"] -= 5
@@ -327,6 +396,10 @@ async def on_message(message: discord.Message):
     
     # Check if the same person is counting twice in a row
     if message.author.id == game["last_counter"]:
+        if game["last_counter"] == None: # warn the user because count reset
+            await message.add_reaction('⚠️')
+            await message.channel.send(f"{message.author.mention} someone just ruined the count! make sure to count the right number next time!. counting starts from  {game['current_number']}")
+            return
         await message.add_reaction('❌')
         if is_counting_up:
             game["current_number"] -= 5
@@ -334,7 +407,7 @@ async def on_message(message: discord.Message):
             game["current_number"] += 5
         await message.channel.send(f"❌ {message.author.mention} can't count twice in a row! The opposing team gets 5 counts. The count is now {game['current_number']}.")
         game["last_counter"] = None
-        save_games(active_games)  # Save after updating the count
+        save_games(active_games)  
         return
     
     # Valid count
@@ -381,6 +454,21 @@ async def on_message(message: discord.Message):
     # Save both stats and games
     save_stats(stats)
     save_games(active_games)
+
+def getTeam(user_id: int, guild: discord.Guild) -> int:
+    """Get user's team based on roles. Returns -1 for down, 1 for up, 0 for none"""
+    member = guild.get_member(user_id)
+    if not member:
+        return 0
+    
+    up_role = discord.utils.get(guild.roles, name=UP_TEAM_ROLE)
+    down_role = discord.utils.get(guild.roles, name=DOWN_TEAM_ROLE)
+    
+    if up_role in member.roles:
+        return 1
+    elif down_role in member.roles:
+        return -1
+    return 0
 
 TOKEN = os.getenv('DISCORD_TOKEN')
 
